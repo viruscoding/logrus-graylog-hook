@@ -17,7 +17,7 @@ type UdpHook struct {
 	extra       map[string]interface{}
 	host        string
 	level       logrus.Level
-	Backend     Backend
+	backend     Backend
 	synchronous bool
 	buf         chan gelfEntry
 	wg          *sync.WaitGroup
@@ -64,7 +64,7 @@ func newUdpHook(synchronous bool, addr string, extra map[string]interface{}) (*U
 		extra:       extra,
 		host:        host,
 		level:       logrus.DebugLevel,
-		Backend:     backend,
+		backend:     backend,
 		synchronous: synchronous,
 		buf:         buf,
 		wg:          wg,
@@ -192,5 +192,5 @@ func (u *UdpHook) sendEntry(entry gelfEntry) error {
 		Level:    level,
 		Extra:    extra,
 	}
-	return u.Backend.SendMessage(m)
+	return u.backend.SendMessage(m)
 }
