@@ -139,6 +139,10 @@ func (u *udpBackend) SendMessage(m *GELFMessage) error {
 	return u.write(buf.Bytes())
 }
 
-func (u *udpBackend) ReadMessage() (*GELFMessage, error) {
+func (u *udpBackend) Close() error {
+	return u.conn.Close()
+}
+
+func (u *udpBackend) LaunchConsumeSync(func(message *GELFMessage) error) error {
 	panic("implement me")
 }

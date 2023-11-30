@@ -13,7 +13,7 @@ import (
 
 var bufMaxSize uint = 8192
 
-type UdpHook struct {
+type Hook struct {
 	extra       map[string]interface{}
 	host        string
 	level       logrus.Level
@@ -33,20 +33,15 @@ type gelfEntry struct {
 	Function string
 }
 
-func NewAsyncUdpHook(addr string, extra map[string]interface{}) (*UdpHook, error) {
-	return newUdpHook(false, addr, extra)
+func NewAsyncHook(backend Backend, extra map[string]interface{}) (*Hook, error) {
+	return newHook(false, backend, extra)
 }
 
-func NewSyncUdpHook(addr string, extra map[string]interface{}) (*UdpHook, error) {
-	return newUdpHook(true, addr, extra)
+func NewSyncHook(backend Backend, extra map[string]interface{}) (*Hook, error) {
+	return newHook(true, backend, extra)
 }
 
-func newUdpHook(synchronous bool, addr string, extra map[string]interface{}) (*UdpHook, error) {
-	backend, err := NewUdpBackend(addr)
-	if err != nil {
-		return nil, err
-	}
-
+func newHook(synchronous bool, backend Backend, extra map[string]interface{}) (*Hook, error) {
 	host, err := os.Hostname()
 	if err != nil {
 		host = "localhost"
@@ -60,7 +55,7 @@ func newUdpHook(synchronous bool, addr string, extra map[string]interface{}) (*U
 		mu = &sync.RWMutex{}
 	}
 
-	hook := &UdpHook{
+	hook := &Hook{
 		extra:       extra,
 		host:        host,
 		level:       logrus.DebugLevel,
@@ -84,16 +79,17 @@ func newUdpHook(synchronous bool, addr string, extra map[string]interface{}) (*U
 	return hook, nil
 }
 
-func (u *UdpHook) Flush() {
+func (u *Hook) FlushAndClose() error {
 	if !u.synchronous {
 		u.mu.Lock() // claim the mutex as a Lock - we want exclusive access to it
 		defer u.mu.Unlock()
 
 		u.wg.Wait()
 	}
+	return u.backend.Close()
 }
 
-func (u *UdpHook) Levels() []logrus.Level {
+func (u *Hook) Levels() []logrus.Level {
 	var levels []logrus.Level
 	for _, level := range logrus.AllLevels {
 		if level <= u.level {
@@ -103,7 +99,7 @@ func (u *UdpHook) Levels() []logrus.Level {
 	return levels
 }
 
-func (u *UdpHook) Fire(entry *logrus.Entry) error {
+func (u *Hook) Fire(entry *logrus.Entry) error {
 	u.mu.RLock() // Claim the mutex as a RLock - allowing multiple go routines to log simultaneously
 	defer u.mu.RUnlock()
 
@@ -142,7 +138,7 @@ func (u *UdpHook) Fire(entry *logrus.Entry) error {
 	return nil
 }
 
-func (u *UdpHook) sendEntry(entry gelfEntry) error {
+func (u *Hook) sendEntry(entry gelfEntry) error {
 	p := bytes.TrimSpace([]byte(entry.Message))
 
 	// 多行则放到full字段，取第一行放到short字段
