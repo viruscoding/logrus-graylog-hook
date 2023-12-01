@@ -104,6 +104,10 @@ func (u *gelfBackend) tcpReconnect(retries int, interval time.Duration) error {
 	if retries == 0 {
 		retries = 1
 	}
+
+	// 先关闭原来的连接
+	_ = u.conn.Close()
+
 	var err error
 	var connectCount int
 	for {
