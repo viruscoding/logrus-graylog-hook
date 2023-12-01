@@ -9,23 +9,52 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
+	"time"
+
+	"github.com/pkg/errors"
 )
 
-type udpBackend struct {
-	mu   *sync.Mutex
-	conn net.Conn
+type NetworkType string
+
+var errNetwork = errors.New("network error")
+
+var (
+	UDP NetworkType = "udp"
+	TCP NetworkType = "tcp"
+)
+
+type gelfBackend struct {
+	mu          *sync.Mutex
+	conn        net.Conn
+	networkType NetworkType
+	addr        string
 }
 
-func NewUdpBackend(addr string) (Backend, error) {
-	conn, err := net.Dial("udp", addr)
+func NewGelfBackend(addr string) (Backend, error) {
+	var err error
+	var networkType NetworkType
+	if strings.HasPrefix(addr, "tcp://") {
+		networkType = TCP
+		addr = strings.TrimPrefix(addr, "tcp://")
+	} else if strings.HasPrefix(addr, "udp://") {
+		networkType = UDP
+		addr = strings.TrimPrefix(addr, "udp://")
+	} else {
+		return nil, fmt.Errorf("invalid protocol: %s", addr)
+	}
+
+	conn, err := net.Dial(string(networkType), addr)
 	if err != nil {
 		return nil, err
 	}
 
-	return &udpBackend{
-		mu:   &sync.Mutex{},
-		conn: conn,
+	return &gelfBackend{
+		mu:          &sync.Mutex{},
+		conn:        conn,
+		networkType: networkType,
+		addr:        addr,
 	}, nil
 }
 
@@ -53,7 +82,49 @@ func numChunks(b []byte) int {
 	}
 }
 
-func (u *udpBackend) write(bs []byte) (err error) {
+func (u *gelfBackend) tcpWrite(bs []byte) error {
+	bs = append(bs, '\x00')
+	bytesLeft := len(bs)
+	for {
+		n, err := u.conn.Write(bs)
+		if err != nil {
+			return errors.Wrap(errNetwork, err.Error())
+		}
+		bytesLeft -= n
+		if bytesLeft == 0 {
+			break
+		}
+	}
+
+	return nil
+}
+
+// tcpReconnect attempts to reconnect to the remote server， if retries is -1, it will retry forever.
+func (u *gelfBackend) tcpReconnect(retries int, interval time.Duration) error {
+	if retries == 0 {
+		retries = 1
+	}
+	var err error
+	var connectCount int
+	for {
+		fmt.Printf("connect  %s://%s retrying %d\n", u.networkType, u.addr, connectCount+1)
+		u.conn, err = net.Dial(string(u.networkType), u.addr)
+		if err != nil {
+			connectCount += 1
+			time.Sleep(interval)
+
+			if retries != -1 && connectCount >= retries {
+				break
+			}
+			continue
+		}
+		break
+	}
+
+	return err
+}
+
+func (u *gelfBackend) udpWrite(bs []byte) (err error) {
 	b := make([]byte, 0, ChunkSize)
 	buf := bytes.NewBuffer(b)
 	chunkCount := numChunks(bs)
@@ -64,7 +135,7 @@ func (u *udpBackend) write(bs []byte) (err error) {
 	if nChunks == 1 {
 		n, err := u.conn.Write(bs)
 		if err != nil {
-			return err
+			return errors.Wrap(errNetwork, err.Error())
 		}
 		if n != len(bs) {
 			return fmt.Errorf("write (%d/%d)", n, len(bs))
@@ -100,7 +171,7 @@ func (u *udpBackend) write(bs []byte) (err error) {
 		// write this chunk, and make sure the write was good
 		n, err := u.conn.Write(buf.Bytes())
 		if err != nil {
-			return fmt.Errorf("write (chunk %d/%d): %s", i, nChunks, err)
+			return errors.Wrap(errNetwork, err.Error())
 		}
 		if n != len(buf.Bytes()) {
 			return fmt.Errorf("write len: (chunk %d/%d) (%d/%d)", i, nChunks, n, len(buf.Bytes()))
@@ -115,12 +186,24 @@ func (u *udpBackend) write(bs []byte) (err error) {
 	return nil
 }
 
-func (u *udpBackend) SendMessage(m *GELFMessage) error {
+func (u *gelfBackend) SendMessage(m *GELFMessage) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
 	data, err := json.Marshal(m)
 	if err != nil {
+		return err
+	}
+
+	// tcp协议重连机制
+	if u.networkType == TCP {
+		err := u.tcpWrite(data)
+		if errors.Is(err, errNetwork) {
+			if err := u.tcpReconnect(-1, time.Second); err != nil {
+				return err
+			}
+			return u.tcpWrite(data)
+		}
 		return err
 	}
 
@@ -136,13 +219,13 @@ func (u *udpBackend) SendMessage(m *GELFMessage) error {
 	// ensure all data is written
 	_ = zw.Close()
 
-	return u.write(buf.Bytes())
+	return u.udpWrite(buf.Bytes())
 }
 
-func (u *udpBackend) Close() error {
+func (u *gelfBackend) Close() error {
 	return u.conn.Close()
 }
 
-func (u *udpBackend) LaunchConsumeSync(func(message *GELFMessage) error) error {
+func (u *gelfBackend) LaunchConsumeSync(func(message *GELFMessage) error) error {
 	panic("implement me")
 }
