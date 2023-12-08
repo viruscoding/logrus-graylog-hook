@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
-	"sync"
-	"time"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/hibiken/asynq"
 )
+
+var LogQueue = "graylog"
 
 type RedisOptions struct {
 	Addr     string
@@ -21,32 +21,34 @@ type RedisOptions struct {
 }
 
 type redisBackend struct {
-	mu    *sync.Mutex
-	redis *redis.Client
+	client *asynq.Client
+	server *asynq.Server
 }
 
 func NewRedisBackend(opts RedisOptions) (Backend, error) {
-	client := redis.NewClient(&redis.Options{
+	redisClientOpt := asynq.RedisClientOpt{
 		Addr:     opts.Addr,
 		Username: opts.Username,
 		Password: opts.Password,
 		DB:       opts.DB,
+	}
+	client := asynq.NewClient(redisClientOpt)
+
+	server := asynq.NewServer(redisClientOpt, asynq.Config{
+		Concurrency: 100,
+		Queues:      map[string]int{LogQueue: 10},
+		ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
+			fmt.Printf("Error: %v\n", err)
+		}),
 	})
 
-	if err := client.Ping(context.Background()).Err(); err != nil {
-		return nil, err
-	}
-
 	return &redisBackend{
-		mu:    &sync.Mutex{},
-		redis: client,
+		client: client,
+		server: server,
 	}, nil
 }
 
 func (r *redisBackend) SendMessage(message *GELFMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	data, err := json.Marshal(message)
 	if err != nil {
 		return err
@@ -65,34 +67,19 @@ func (r *redisBackend) SendMessage(message *GELFMessage) error {
 	// ensure all data is written
 	_ = zw.Close()
 
-	// base64 encode
-	b64Data := base64.RawStdEncoding.EncodeToString(buf.Bytes())
-
-	return r.redis.RPush(context.Background(), "graylog", b64Data).Err()
+	_, err = r.client.Enqueue(asynq.NewTask("gelf_message", buf.Bytes()), asynq.Queue(LogQueue))
+	return err
 }
 
 func (r *redisBackend) Close() error {
-	return r.redis.Close()
+	return r.client.Close()
 }
 
 func (r *redisBackend) LaunchConsumeSync(f func(message *GELFMessage) error) error {
-	for {
-		// items[0] - the name of the key where an element was popped
-		// items[1] - the value of the popped element
-		items, err := r.redis.BLPop(context.Background(), 0, "graylog").Result()
-		if err != nil || len(items) != 2 || items[1] == "" {
-			time.Sleep(time.Second)
-			continue
-		}
-
-		// base64 decode
-		decodeBytes, err := base64.RawStdEncoding.DecodeString(items[1])
-		if err != nil {
-			return err
-		}
-
+	mux := asynq.NewServeMux()
+	mux.HandleFunc("gelf_message", func(ctx context.Context, task *asynq.Task) error {
 		// 解压
-		zr, err := gzip.NewReader(bytes.NewReader(decodeBytes))
+		zr, err := gzip.NewReader(bytes.NewReader(task.Payload()))
 		if err != nil {
 			return err
 		}
@@ -107,9 +94,10 @@ func (r *redisBackend) LaunchConsumeSync(f func(message *GELFMessage) error) err
 		}
 
 		if err := f(&gelfMessage); err != nil {
-			// 处理失败，将消息重新放回队列
-			r.redis.RPush(context.Background(), "graylog", items[1])
 			return err
 		}
-	}
+		return nil
+	})
+
+	return r.server.Run(mux)
 }

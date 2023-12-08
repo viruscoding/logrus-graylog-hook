@@ -5,13 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
-
-var bufMaxSize uint = 8192
 
 type Hook struct {
 	extra       map[string]interface{}
@@ -19,9 +16,7 @@ type Hook struct {
 	level       logrus.Level
 	backend     Backend
 	synchronous bool
-	buf         chan gelfEntry
-	wg          *sync.WaitGroup
-	mu          *sync.RWMutex
+	queue       *BlockingList
 }
 
 type gelfEntry struct {
@@ -46,13 +41,9 @@ func newHook(synchronous bool, backend Backend, extra map[string]interface{}) (*
 	if err != nil {
 		host = "localhost"
 	}
-	var buf chan gelfEntry
-	var wg *sync.WaitGroup
-	var mu *sync.RWMutex
+	var queue *BlockingList
 	if !synchronous {
-		buf = make(chan gelfEntry, bufMaxSize)
-		wg = &sync.WaitGroup{}
-		mu = &sync.RWMutex{}
+		queue = NewBlockingList()
 	}
 
 	hook := &Hook{
@@ -61,30 +52,31 @@ func newHook(synchronous bool, backend Backend, extra map[string]interface{}) (*
 		level:       logrus.DebugLevel,
 		backend:     backend,
 		synchronous: synchronous,
-		buf:         buf,
-		wg:          wg,
-		mu:          mu,
+		queue:       queue,
 	}
 	if !synchronous {
-		go func() {
-			for {
-				entry := <-hook.buf
-				if err := hook.sendEntry(entry); err != nil {
-					fmt.Println(err)
+		for i := 0; i < 500; i++ {
+			go func() {
+				for {
+					entry := hook.queue.FrontBlock()
+					if err := hook.sendEntry(entry.(gelfEntry)); err != nil {
+						fmt.Println(err)
+					}
 				}
-				hook.wg.Done()
-			}
-		}()
+			}()
+		}
 	}
 	return hook, nil
 }
 
 func (u *Hook) FlushAndClose() error {
 	if !u.synchronous {
-		u.mu.Lock() // claim the mutex as a Lock - we want exclusive access to it
-		defer u.mu.Unlock()
-
-		u.wg.Wait()
+		for {
+			if u.queue.Len() == 0 {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
 	}
 	return u.backend.Close()
 }
@@ -100,9 +92,6 @@ func (u *Hook) Levels() []logrus.Level {
 }
 
 func (u *Hook) Fire(entry *logrus.Entry) error {
-	u.mu.RLock() // Claim the mutex as a RLock - allowing multiple go routines to log simultaneously
-	defer u.mu.RUnlock()
-
 	var file, function string
 	var line int
 
@@ -131,8 +120,7 @@ func (u *Hook) Fire(entry *logrus.Entry) error {
 			return err
 		}
 	} else {
-		u.wg.Add(1)
-		u.buf <- gEntry
+		u.queue.PushBack(gEntry)
 	}
 
 	return nil
