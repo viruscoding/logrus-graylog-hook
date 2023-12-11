@@ -19,6 +19,8 @@ type RedisOptions struct {
 	Username string
 	Password string
 	DB       int
+	// Workers  asynq maximum number of concurrent processing of tasks. default 100
+	Workers int
 }
 
 type redisBackend struct {
@@ -27,6 +29,9 @@ type redisBackend struct {
 }
 
 func NewRedisBackend(opts RedisOptions) Backend {
+	if opts.Workers <= 0 {
+		opts.Workers = 100
+	}
 	redisClientOpt := asynq.RedisClientOpt{
 		Addr:     opts.Addr,
 		Username: opts.Username,
@@ -36,7 +41,7 @@ func NewRedisBackend(opts RedisOptions) Backend {
 	client := asynq.NewClient(redisClientOpt)
 
 	server := asynq.NewServer(redisClientOpt, asynq.Config{
-		Concurrency: 100,
+		Concurrency: opts.Workers,
 		Queues:      map[string]int{LogQueue: 10},
 		ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
 			fmt.Printf("Error: %v\n", err)

@@ -26,36 +26,40 @@ type gelfEntry struct {
 	File     string
 	Line     int
 	Function string
+	Time     time.Time
 }
 
-func NewAsyncHook(backend Backend, extra map[string]interface{}) (*Hook, error) {
-	return newHook(false, backend, extra)
+type HookOptions struct {
+	Backend     Backend
+	Extra       map[string]interface{}
+	Synchronous bool
+	// Concurrency is the number of goroutines to use when sending messages to the backend,default 100
+	Concurrency int
 }
 
-func NewSyncHook(backend Backend, extra map[string]interface{}) (*Hook, error) {
-	return newHook(true, backend, extra)
-}
-
-func newHook(synchronous bool, backend Backend, extra map[string]interface{}) (*Hook, error) {
+func NewHook(opts HookOptions) *Hook {
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = 100
+	}
 	host, err := os.Hostname()
 	if err != nil {
 		host = "localhost"
 	}
 	var queue *BlockingList
-	if !synchronous {
+	if !opts.Synchronous {
 		queue = NewBlockingList()
 	}
 
 	hook := &Hook{
-		extra:       extra,
+		extra:       opts.Extra,
 		host:        host,
 		level:       logrus.DebugLevel,
-		backend:     backend,
-		synchronous: synchronous,
+		backend:     opts.Backend,
+		synchronous: opts.Synchronous,
 		queue:       queue,
 	}
-	if !synchronous {
-		for i := 0; i < 500; i++ {
+	if !opts.Synchronous {
+		for i := 0; i < opts.Concurrency; i++ {
 			go func() {
 				for {
 					entry := hook.queue.FrontBlock()
@@ -66,7 +70,7 @@ func newHook(synchronous bool, backend Backend, extra map[string]interface{}) (*
 			}()
 		}
 	}
-	return hook, nil
+	return hook
 }
 
 func (u *Hook) FlushAndClose() error {
@@ -113,6 +117,7 @@ func (u *Hook) Fire(entry *logrus.Entry) error {
 		File:     file,
 		Line:     line,
 		Function: function,
+		Time:     time.Now(),
 	}
 
 	if u.synchronous {
@@ -172,7 +177,7 @@ func (u *Hook) sendEntry(entry gelfEntry) error {
 		Host:     u.host,
 		Short:    string(short),
 		Full:     string(full),
-		TimeUnix: float64(time.Now().UnixNano()/1000000) / 1000.,
+		TimeUnix: float64(entry.Time.UnixNano()/1000000) / 1000.,
 		Level:    level,
 		Extra:    extra,
 	}
