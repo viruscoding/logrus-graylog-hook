@@ -223,6 +223,6 @@ func (u *gelfBackend) Close() error {
 	return u.conn.Close()
 }
 
-func (u *gelfBackend) LaunchConsumeSync(func(message *GELFMessage) error) error {
+func (u *gelfBackend) LaunchConsume(func(message *GELFMessage) error) error {
 	panic("implement me")
 }

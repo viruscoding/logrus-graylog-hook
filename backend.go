@@ -7,6 +7,6 @@ type Backend interface {
 	// Close the backend
 	Close() error
 
-	// LaunchConsumeSync start consuming messages from the backend
-	LaunchConsumeSync(func(message *GELFMessage) error) error
+	// LaunchConsume start consuming messages from the backend
+	LaunchConsume(func(message *GELFMessage) error) error
 }

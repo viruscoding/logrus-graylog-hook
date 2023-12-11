@@ -82,7 +82,7 @@ func (r *redisBackend) Close() error {
 	return r.client.Close()
 }
 
-func (r *redisBackend) LaunchConsumeSync(f func(message *GELFMessage) error) error {
+func (r *redisBackend) LaunchConsume(f func(message *GELFMessage) error) error {
 	mux := asynq.NewServeMux()
 	mux.HandleFunc("gelf_message", func(ctx context.Context, task *asynq.Task) error {
 		// 解压
