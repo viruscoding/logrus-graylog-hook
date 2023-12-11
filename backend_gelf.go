@@ -12,13 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 type NetworkType string
-
-var errNetwork = errors.New("network error")
 
 var (
 	UDP NetworkType = "udp"
@@ -88,7 +84,7 @@ func (u *gelfBackend) tcpWritePack(pack []byte) error {
 	for {
 		n, err := u.conn.Write(pack)
 		if err != nil {
-			return errors.Wrap(errNetwork, err.Error())
+			return err
 		}
 		bytesLeft -= n
 		if bytesLeft == 0 {
@@ -106,7 +102,7 @@ func (u *gelfBackend) tcpReconnect(interval time.Duration) {
 
 	var connectCount int
 	for {
-		fmt.Printf("connect  %s://%s retrying %d\n", u.networkType, u.addr, connectCount+1)
+		fmt.Printf("connect  %s://%s retrying %d\n", u.networkType, u.addr, connectCount)
 		conn, err := net.Dial(string(u.networkType), u.addr)
 		if err != nil {
 			connectCount += 1
@@ -129,7 +125,7 @@ func (u *gelfBackend) udpWritePack(pack []byte) (err error) {
 	if nChunks == 1 {
 		n, err := u.conn.Write(pack)
 		if err != nil {
-			return errors.Wrap(errNetwork, err.Error())
+			return err
 		}
 		if n != len(pack) {
 			return fmt.Errorf("write (%d/%d)", n, len(pack))
@@ -165,7 +161,7 @@ func (u *gelfBackend) udpWritePack(pack []byte) (err error) {
 		// write this chunk, and make sure the write was good
 		n, err := u.conn.Write(buf.Bytes())
 		if err != nil {
-			return errors.Wrap(errNetwork, err.Error())
+			return err
 		}
 		if n != len(buf.Bytes()) {
 			return fmt.Errorf("write len: (chunk %d/%d) (%d/%d)", i, nChunks, n, len(buf.Bytes()))
@@ -193,11 +189,8 @@ func (u *gelfBackend) SendMessage(m *GELFMessage) error {
 	if u.networkType == TCP {
 		for {
 			if err := u.tcpWritePack(data); err != nil {
-				if errors.Is(err, errNetwork) {
-					u.tcpReconnect(time.Second)
-					continue
-				}
-				return err
+				u.tcpReconnect(time.Second)
+				continue
 			}
 			return nil
 		}
