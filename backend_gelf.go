@@ -82,11 +82,11 @@ func numChunks(b []byte) int {
 	}
 }
 
-func (u *gelfBackend) tcpWrite(bs []byte) error {
-	bs = append(bs, '\x00')
-	bytesLeft := len(bs)
+func (u *gelfBackend) tcpWritePack(pack []byte) error {
+	pack = append(pack, '\x00')
+	bytesLeft := len(pack)
 	for {
-		n, err := u.conn.Write(bs)
+		n, err := u.conn.Write(pack)
 		if err != nil {
 			return errors.Wrap(errNetwork, err.Error())
 		}
@@ -99,50 +99,40 @@ func (u *gelfBackend) tcpWrite(bs []byte) error {
 	return nil
 }
 
-// tcpReconnect attempts to reconnect to the remote server， if retries is -1, it will retry forever.
-func (u *gelfBackend) tcpReconnect(retries int, interval time.Duration) error {
-	if retries == 0 {
-		retries = 1
-	}
-
+// tcpReconnect 重连直到成功
+func (u *gelfBackend) tcpReconnect(interval time.Duration) {
 	// 先关闭原来的连接
 	_ = u.conn.Close()
 
-	var err error
 	var connectCount int
 	for {
 		fmt.Printf("connect  %s://%s retrying %d\n", u.networkType, u.addr, connectCount+1)
-		u.conn, err = net.Dial(string(u.networkType), u.addr)
+		conn, err := net.Dial(string(u.networkType), u.addr)
 		if err != nil {
 			connectCount += 1
 			time.Sleep(interval)
-
-			if retries != -1 && connectCount >= retries {
-				break
-			}
 			continue
 		}
-		break
+		u.conn = conn
+		return
 	}
-
-	return err
 }
 
-func (u *gelfBackend) udpWrite(bs []byte) (err error) {
+func (u *gelfBackend) udpWritePack(pack []byte) (err error) {
 	b := make([]byte, 0, ChunkSize)
 	buf := bytes.NewBuffer(b)
-	chunkCount := numChunks(bs)
+	chunkCount := numChunks(pack)
 	if chunkCount > 255 {
 		return fmt.Errorf("msg too large, would need %d chunks", chunkCount)
 	}
 	nChunks := uint8(chunkCount)
 	if nChunks == 1 {
-		n, err := u.conn.Write(bs)
+		n, err := u.conn.Write(pack)
 		if err != nil {
 			return errors.Wrap(errNetwork, err.Error())
 		}
-		if n != len(bs) {
-			return fmt.Errorf("write (%d/%d)", n, len(bs))
+		if n != len(pack) {
+			return fmt.Errorf("write (%d/%d)", n, len(pack))
 		}
 		return nil
 	}
@@ -153,7 +143,7 @@ func (u *gelfBackend) udpWrite(bs []byte) (err error) {
 		return fmt.Errorf("rand.Reader: %d/%s", n, err)
 	}
 
-	bytesLeft := len(bs)
+	bytesLeft := len(pack)
 	for i := uint8(0); i < nChunks; i++ {
 		buf.Reset()
 		// manually write header.  Don't care about
@@ -169,7 +159,7 @@ func (u *gelfBackend) udpWrite(bs []byte) (err error) {
 			chunkLen = bytesLeft
 		}
 		off := int(i) * chunkedDataLen
-		chunk := bs[off : off+chunkLen]
+		chunk := pack[off : off+chunkLen]
 		buf.Write(chunk)
 
 		// write this chunk, and make sure the write was good
@@ -199,18 +189,21 @@ func (u *gelfBackend) SendMessage(m *GELFMessage) error {
 		return err
 	}
 
-	// tcp协议重连机制
+	// tcp协议发送
 	if u.networkType == TCP {
-		err := u.tcpWrite(data)
-		if errors.Is(err, errNetwork) {
-			if err := u.tcpReconnect(-1, time.Second); err != nil {
+		for {
+			if err := u.tcpWritePack(data); err != nil {
+				if errors.Is(err, errNetwork) {
+					u.tcpReconnect(time.Second)
+					continue
+				}
 				return err
 			}
-			return u.tcpWrite(data)
+			return nil
 		}
-		return err
 	}
 
+	// udp协议发送
 	var buf bytes.Buffer
 	zw, err := gzip.NewWriterLevel(&buf, flate.BestSpeed)
 	if err != nil {
@@ -223,7 +216,7 @@ func (u *gelfBackend) SendMessage(m *GELFMessage) error {
 	// ensure all data is written
 	_ = zw.Close()
 
-	return u.udpWrite(buf.Bytes())
+	return u.udpWritePack(buf.Bytes())
 }
 
 func (u *gelfBackend) Close() error {

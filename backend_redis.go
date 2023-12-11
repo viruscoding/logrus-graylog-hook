@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/hibiken/asynq"
 )
@@ -25,7 +26,7 @@ type redisBackend struct {
 	server *asynq.Server
 }
 
-func NewRedisBackend(opts RedisOptions) (Backend, error) {
+func NewRedisBackend(opts RedisOptions) Backend {
 	redisClientOpt := asynq.RedisClientOpt{
 		Addr:     opts.Addr,
 		Username: opts.Username,
@@ -45,7 +46,7 @@ func NewRedisBackend(opts RedisOptions) (Backend, error) {
 	return &redisBackend{
 		client: client,
 		server: server,
-	}, nil
+	}
 }
 
 func (r *redisBackend) SendMessage(message *GELFMessage) error {
@@ -67,8 +68,14 @@ func (r *redisBackend) SendMessage(message *GELFMessage) error {
 	// ensure all data is written
 	_ = zw.Close()
 
-	_, err = r.client.Enqueue(asynq.NewTask("gelf_message", buf.Bytes()), asynq.Queue(LogQueue))
-	return err
+	for {
+		if _, err := r.client.Enqueue(asynq.NewTask("gelf_message", buf.Bytes()), asynq.Queue(LogQueue)); err != nil {
+			fmt.Printf("enqueue error: %v\n", err)
+			time.Sleep(time.Second)
+			continue
+		}
+		return nil
+	}
 }
 
 func (r *redisBackend) Close() error {
